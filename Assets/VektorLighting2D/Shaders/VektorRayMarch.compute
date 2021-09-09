@@ -1,0 +1,147 @@
+#pragma kernel GenerateRays;
+#pragma kernel MarchRays;
+#pragma kernel GatherRays;
+
+struct Ray {
+    float2 origin;      // Origin of the ray.
+    float2 direction;   // Normalized direction of the ray.
+    float3 color;       // Color the ray will contribute to the pixel if it reaches the target light.
+    float distance;     // Distance ray must travel to hit the target light.
+};
+
+struct PointLight {
+    float2 position;
+    float3 color;
+    float radius;
+};
+
+struct Circle {
+    float2 position;
+    float radius;
+};
+
+struct Rect {
+    float2 position;
+    float2 extents;
+};
+
+float CircleSDF(const Circle circle, const float2 position) {
+    return length(position - circle.position) - circle.radius;
+}
+
+float RectSDF(const Rect rect, const float2 position) {
+    float2 d = abs(position - rect.position) - rect.extents;
+    return length(max(d,0.0)) + min(max(d.x,d.y),0.0);
+}
+
+// General config.
+uint MaxSteps;
+uint MaxBounces;
+uint LightCount;
+
+uint Width;
+uint Height;
+
+// Light buffers.
+StructuredBuffer<PointLight> PointLights;
+
+// Occluder buffers.
+StructuredBuffer<Circle> Circles;
+StructuredBuffer<Rect> Rects;
+
+// Rays and result.
+RWStructuredBuffer<Ray> Rays;
+
+AppendStructuredBuffer<Ray> RaysAppend;
+
+RWTexture2D<float4> Result;
+
+float SceneDistance(const float2 position) {
+    float d = 1e8;
+
+    // Test against all circles.
+    uint nc, cs;
+    Circles.GetDimensions(nc, cs);
+    for (uint j = 0; j < nc; j++) {
+        const Circle circle = Circles[j];
+        const float cd = CircleSDF(circle, position);
+        d = min(cd, d);
+    }
+
+    // Test against all rects.
+    uint rc, rs;
+    Rects.GetDimensions(rc, rs);
+    for (uint i = 0; i < rc; i++) {
+        const Rect rect = Rects[i];
+        const float cd = RectSDF(rect, position);
+        d = min(cd, d);
+    }
+    
+    return d;
+}
+
+// Generates rays for all light sources for which the position is within the influence of.
+uint GenerateLightRays(const float2 position) {
+    
+}
+
+// Generates rays for each pixel.
+[numthreads(8,8,1)]
+void GenerateRays (uint3 id : SV_DispatchThreadID) {
+    for (uint i = 0; i < LightCount; i++) {
+        const PointLight light = PointLights[i];
+        
+        const float light_dist = distance(id.xy, light.position);
+        const float falloff = 1.0 - clamp(light_dist / light.radius, 0, 1);
+        
+        Ray ray;
+        ray.color = light.color * (falloff * falloff);
+        ray.origin = id.xy;
+        ray.direction = normalize(light.position - id.xy);
+        ray.distance = light_dist;
+
+        const uint pixel_id = id.x + id.y * Width;
+        Rays[pixel_id * LightCount + i] = ray;
+    }
+
+    Result[id.xy] = float4(0, 0, 0, 0);
+}
+
+// Marches each ray once and generates secondary rays.
+[numthreads(512,1,1)]
+void MarchRays (uint3 id : SV_DispatchThreadID) {
+    Ray ray = Rays[id.x];
+    float rayDistance = 0.0;
+    for (uint i = 0; i < MaxSteps; i++) {
+        // Hit the light.
+        if (rayDistance > ray.distance) {
+            break;
+        }
+
+        // Hit something else.
+        const float scene_distance = SceneDistance(ray.origin + ray.direction * rayDistance);
+        if (scene_distance < 1) {
+            ray.color = float3(0,0,0);
+            break;
+        }
+
+        // Keep going.
+        rayDistance += scene_distance;
+    }
+
+    Rays[id.x] = ray;
+}
+
+
+// Gathers ray results into the final texture.
+[numthreads(8,8,1)]
+void GatherRays (uint3 id : SV_DispatchThreadID) {
+    float4 final = float4(0,0,0,1);
+    
+    for (uint i = 0; i < LightCount; i++) {
+        const Ray ray = Rays[(id.x + id.y * Width) * LightCount + i];
+        final.rgb += ray.color;
+    }
+    
+    Result[id.xy] = final;
+}
