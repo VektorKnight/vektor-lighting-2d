@@ -1,38 +1,8 @@
-#pragma kernel GenerateRays;
+#pragma kernel InitializeRays;
 #pragma kernel MarchRays;
-#pragma kernel GatherRays;
+#pragma kernel GenerateResult;
 
-struct Ray {
-    float2 origin;      // Origin of the ray.
-    float2 direction;   // Normalized direction of the ray.
-    float3 color;       // Color the ray will contribute to the pixel if it reaches the target light.
-    float distance;     // Distance ray must travel to hit the target light.
-};
-
-struct PointLight {
-    float2 position;
-    float3 color;
-    float radius;
-};
-
-struct Circle {
-    float2 position;
-    float radius;
-};
-
-struct Rect {
-    float2 position;
-    float2 extents;
-};
-
-float CircleSDF(const Circle circle, const float2 position) {
-    return length(position - circle.position) - circle.radius;
-}
-
-float RectSDF(const Rect rect, const float2 position) {
-    float2 d = abs(position - rect.position) - rect.extents;
-    return length(max(d,0.0)) + min(max(d.x,d.y),0.0);
-}
+#include "RayMarchCommon.cginc"
 
 // General config.
 uint MaxSteps;
@@ -50,10 +20,10 @@ StructuredBuffer<Circle> Circles;
 StructuredBuffer<Rect> Rects;
 
 // Rays and result.
-RWStructuredBuffer<Ray> Rays;
+ConsumeStructuredBuffer<Ray> InputRays;
+AppendStructuredBuffer<Ray> OutputRays;
 
-AppendStructuredBuffer<Ray> RaysAppend;
-
+RWStructuredBuffer<uint> Accumulation;
 RWTexture2D<float4> Result;
 
 float SceneDistance(const float2 position) {
@@ -81,67 +51,109 @@ float SceneDistance(const float2 position) {
 }
 
 // Generates rays for all light sources for which the position is within the influence of.
-uint GenerateLightRays(const float2 position) {
+void GenerateLightRays(const float2 position, const uint id) {
+    for (uint i = 0; i < LightCount; i++) {
+        const PointLight light = PointLights[i];
+        
+        const float light_dist = distance(position, light.position);
+        const float scene_dist = SceneDistance(position);
+        
+        // Skip if ray origin is outside the light's influence.
+        if (light_dist > light.radius || scene_dist < 1e-4) {
+            continue;
+        }
+        
+        const float falloff = 1.0 - clamp(light_dist / light.radius, 0, 1);
+        
+        Ray ray;
+        ray.id = id;
+        ray.color = light.color * (falloff * falloff);
+        ray.origin = position;
+        ray.direction = normalize(light.position - position);
+        ray.distance = 0.0;
+        
+        ray.light_id = i;
+        ray.light_distance = light_dist;
+
+        OutputRays.Append(ray);
+    }
+}
+
+void AddRayContribution(const Ray ray, const float scale) {
+    // Build packed RGBA value.
+    // Alpha is ignored since it just gets hard-set later.
+    const float3 color = ray.color * scale;
+    const uint3 v = uint3 (
+        (uint)(color.r * 255) & 0xFF,
+        (uint)(color.g * 255) & 0xFF,
+        (uint)(color.b * 255) & 0xFF
+    );
     
+    uint current = 0;
+    uint original = 0;
+    while (true) {
+        const uint updated = AddPacked(current, v);
+        InterlockedCompareExchange(Accumulation[ray.id], current, updated, original);
+        if (original == current) {
+            break;
+        }
+
+        current = original;
+    }
 }
 
 // Generates rays for each pixel.
 [numthreads(8,8,1)]
-void GenerateRays (uint3 id : SV_DispatchThreadID) {
-    for (uint i = 0; i < LightCount; i++) {
-        const PointLight light = PointLights[i];
-        
-        const float light_dist = distance(id.xy, light.position);
-        const float falloff = 1.0 - clamp(light_dist / light.radius, 0, 1);
-        
-        Ray ray;
-        ray.color = light.color * (falloff * falloff);
-        ray.origin = id.xy;
-        ray.direction = normalize(light.position - id.xy);
-        ray.distance = light_dist;
+void InitializeRays (uint3 id : SV_DispatchThreadID) {
+    GenerateLightRays(id.xy, id.x + id.y * Width);
 
-        const uint pixel_id = id.x + id.y * Width;
-        Rays[pixel_id * LightCount + i] = ray;
-    }
-
-    Result[id.xy] = float4(0, 0, 0, 0);
+    Accumulation[id.x + id.y * Width] = 0;
+    Result[id.xy] = float4(0,0,0,0);
 }
 
-// Marches each ray once and generates secondary rays.
-[numthreads(512,1,1)]
+// Marches each ray once and adds their contribution to the accumulation buffer.
+// Rays which hit something other than their target light will generate bounce rays if enabled.
+[numthreads(64, 1, 1)]
 void MarchRays (uint3 id : SV_DispatchThreadID) {
-    Ray ray = Rays[id.x];
-    float rayDistance = 0.0;
+    Ray ray = InputRays.Consume();
+    
+    if (ray.light_distance == 0) {
+        return;
+    }
+    
+    float light_contribution = 1.0;
     for (uint i = 0; i < MaxSteps; i++) {
         // Hit the light.
-        if (rayDistance > ray.distance) {
+        if (ray.distance > ray.light_distance) {
+            AddRayContribution(ray, clamp(light_contribution, 1e-1, 1));
             break;
         }
 
         // Hit something else.
-        const float scene_distance = SceneDistance(ray.origin + ray.direction * rayDistance);
-        if (scene_distance < 1) {
-            ray.color = float3(0,0,0);
+        const float2 rayPos = ray.origin + ray.direction * ray.distance;
+        const float scene_distance = SceneDistance(rayPos);
+        if (scene_distance < 1e-1) {
             break;
         }
 
-        // Keep going.
-        rayDistance += scene_distance;
-    }
+        light_contribution = min(light_contribution, scene_distance / 3);
 
-    Rays[id.x] = ray;
+        // Keep going.
+        ray.distance += scene_distance;
+    }
 }
 
+// Generates the final output texture from the accumulation buffer.
+[numthreads(8, 8, 1)]
+void GenerateResult(uint3 id : SV_DispatchThreadID) {
+    const uint packed = Accumulation[id.x + id.y * Width];
 
-// Gathers ray results into the final texture.
-[numthreads(8,8,1)]
-void GatherRays (uint3 id : SV_DispatchThreadID) {
-    float4 final = float4(0,0,0,1);
-    
-    for (uint i = 0; i < LightCount; i++) {
-        const Ray ray = Rays[(id.x + id.y * Width) * LightCount + i];
-        final.rgb += ray.color;
-    }
-    
+    const float4 final = float4(
+        (float)(packed & 0xFF) / 255.0,
+        (float)(packed >> 8 & 0xFF) / 255.0,
+        (float)(packed >> 16 & 0xFF) / 255.0,
+        1.0
+    );
+
     Result[id.xy] = final;
 }

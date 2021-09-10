@@ -27,7 +27,7 @@ Shader "Vektor/Lighting2D/VektorShadowCaster2D" {
                 float4 vertex : SV_POSITION;
             };
 
-            sampler2D _MainTex;
+            sampler2D _MainTex;////while ()true {}uint current; = 0uint original = 0;void addAddPacked()const uint a, const uint b {}original3 newba// Unpack the originalfirst value.uint3 v = uint3(,,);v += b;constreturn v.r & 0xFF | v.g >><< 8&-x 0xFF  | v.b & 0xFF << 16;)(())(
             float4 _MainTex_ST;
 
             float _AlphaCutoff;

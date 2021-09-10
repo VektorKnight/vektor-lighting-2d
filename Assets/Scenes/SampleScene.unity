@@ -876,9 +876,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4a5ec09830ca4a188ab4edd0ec6a4517, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  _renderScale: 0.25
-  _maxSteps: 8
-  _maxBounces: 8
+  _renderScale: 1
+  _maxSteps: 128
+  _maxBounces: 1
   _rayMarch: {fileID: 7200000, guid: b374a0f44cf6c4f43a8cb1808e448bf4, type: 3}
   _target: {fileID: 1923924162}
 --- !u!114 &1923924162
