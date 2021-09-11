@@ -1,0 +1,287 @@
+#pragma kernel InitializeRays;
+#pragma kernel MarchRays;
+#pragma kernel GenerateResult;
+
+#include "RayMarchCommon.cginc"
+
+static const float EPSILON = 1e-4;
+
+// General config.
+uint MaxSteps;
+uint MaxBounces;
+
+uint Width;
+uint Height;
+
+// Light buffers.
+StructuredBuffer<PointLight> PointLights;
+StructuredBuffer<SpotLight> SpotLights;
+StructuredBuffer<PolygonLight> PolygonLights;
+
+// Occluder buffers.
+StructuredBuffer<Circle> Circles;
+StructuredBuffer<Rect> Rects;
+StructuredBuffer<Segment> Segments;
+
+// Rays and result.
+ConsumeStructuredBuffer<Ray> InputRays;
+AppendStructuredBuffer<Ray> OutputRays;
+
+RWStructuredBuffer<uint> Accumulation;
+RWTexture2D<float4> Result;
+
+SceneResult SceneDistance(const float2 position) {
+    float distance = 1e8;
+    uint shape_id;
+    uint shape_type;
+
+    // Test against all circles.
+    uint nc, cs;
+    Circles.GetDimensions(nc, cs);
+    for (uint j = 0; j < nc; j++) {
+        const Circle circle = Circles[j];
+        const float circle_dist = CircleSDF(circle, position);
+
+        if (circle_dist < distance) {
+            distance = circle_dist;
+            shape_id = j;
+            shape_type = SHAPE_TYPE_CIRCLE;
+        }
+    }
+
+    // Test against all rects.
+    uint rc, rs;
+    Rects.GetDimensions(rc, rs);
+    for (uint i = 0; i < rc; i++) {
+        const Rect rect = Rects[i];
+        const float rect_dist = RectSDF(rect, position);
+
+        if (rect_dist < distance) {
+            distance = rect_dist;
+            shape_id = i;
+            shape_type = SHAPE_TYPE_RECT;
+        }
+        
+    }
+
+    SceneResult result;
+    result.distance = distance;
+    result.shape_id = shape_id;
+    result.shape_type = shape_type;
+    
+    return result;
+}
+
+// Add the color contribution of a ray to the accumulation buffer.
+void AddRayContribution(const Ray ray, const float scale) {
+    // Build packed RGBA value.
+    // Alpha is ignored since it just gets hard-set later.
+    const float3 color = ray.color * scale;
+    const uint3 v = uint3 (
+        (uint)(color.r * 255) & 0xFF,
+        (uint)(color.g * 255) & 0xFF,
+        (uint)(color.b * 255) & 0xFF
+    );
+    
+    uint current = 0;
+    uint original = 0;
+    while (true) {
+        const uint updated = AddPacked(current, v);
+        InterlockedCompareExchange(Accumulation[ray.id], current, updated, original);
+        if (original == current) {
+            break;
+        }
+
+        current = original;
+    }
+}
+
+// Generates rays for all light sources for which the position is within the influence of.
+void GeneratePointLightRays(const float2 position, const uint id) {
+    // Point lights.
+    uint pc, ps;
+    PointLights.GetDimensions(pc, ps);
+    for (uint i = 0; i < pc; i++) {
+        const PointLight point_light = PointLights[i];
+        
+        const float light_dist = distance(position, point_light.position);
+        const SceneResult scene_result = SceneDistance(position);
+        
+        // Skip if ray origin is outside the light's influence or inside an occluder.
+        if (light_dist > point_light.radius || scene_result.distance < EPSILON) {
+            continue;
+        }
+        
+        const float falloff = 1.0 - clamp(light_dist / point_light.radius, 0, 1);
+        
+        Ray ray;
+        ray.id = id;
+        ray.color = point_light.color * (falloff * falloff);
+        ray.origin = position;
+        ray.direction = normalize(point_light.position - position);
+        ray.distance = 0.0;
+        ray.light_id = i;
+        ray.light_type = RAY_TYPE_POINT;
+        ray.light_distance = light_dist;
+
+        OutputRays.Append(ray);
+    }
+}
+
+// Generates rays for all light sources for which the position is within the influence of.
+void GenerateSpotLightRays(const float2 position, const uint id) {
+    // Point lights.
+    uint count, _;
+    SpotLights.GetDimensions(count, _);
+    for (uint i = 0; i < count; i++) {
+        const SpotLight spot_light = SpotLights[i];
+        
+        const float light_dist = distance(position, spot_light.position);
+        const SceneResult scene_result = SceneDistance(position);
+        
+        // Skip if ray origin is outside the light's influence or inside an occluder.
+        if (light_dist > spot_light.radius || scene_result.distance < EPSILON) {
+            continue;
+        }
+
+        // Skip if ray direction is outside the cone.
+        const float2 direction = normalize(spot_light.position - position);
+        if (!IsVectorBetween(spot_light.cone.xy, spot_light.cone.zw, direction)) {
+            continue;
+        }
+        
+        const float falloff = 1.0 - clamp(light_dist / spot_light.radius, 0, 1);
+        
+        Ray ray;
+        ray.id = id;
+        ray.color = spot_light.color * (falloff * falloff);
+        ray.origin = position;
+        ray.direction = direction;
+        ray.distance = 0.0;
+        ray.light_id = i;
+        ray.light_type = RAY_TYPE_POINT;
+        ray.light_distance = light_dist;
+
+        OutputRays.Append(ray);
+    }
+}
+
+// Generates rays for all light sources for which the position is within the influence of.
+void GeneratePolygonLightRays(const float2 position, const uint id) {
+    uint pc, ps;
+    PolygonLights.GetDimensions(pc, ps);
+    for (uint i = 0; i < pc; i++) {
+        const PolygonLight polygon_light = PolygonLights[i];
+        const float2 nearest = ClosestPointOnPolygon(polygon_light.polygon, Segments, position);
+        
+        const float light_dist = PolygonSDF(polygon_light.polygon, Segments, position);
+        const SceneResult scene_result = SceneDistance(position);
+        
+        // Skip if ray origin is outside the light's influence or inside an occluder.
+        if (light_dist > polygon_light.radius || scene_result.distance < EPSILON) {
+           continue;
+        }
+        
+        const float falloff = 1.0 - clamp(light_dist / polygon_light.radius, 0, 1);
+        
+        Ray ray;
+        ray.id = id;
+        ray.color = polygon_light.color * (falloff * falloff);
+        ray.origin = position;
+        ray.direction = normalize(nearest - position);
+        ray.distance = 0.0;
+        ray.light_id = i;
+        ray.light_type = RAY_TYPE_POLY;
+        ray.light_distance = light_dist;
+        
+        // Skip and just add contribution if ray starts within the light.
+        if (light_dist < EPSILON) {
+            AddRayContribution(ray, 1.0);
+            continue;
+        }
+
+        OutputRays.Append(ray);
+    }
+}
+
+// Generates rays for each pixel.
+[numthreads(8,8,1)]
+void InitializeRays (uint3 id : SV_DispatchThreadID) {
+    // Clear accumulation and final result.
+    Accumulation[id.x + id.y * Width] = 0;
+    Result[id.xy] = float4(0,0,0,0);
+    
+    // Generate rays for this pixel.
+    GeneratePointLightRays(id.xy, id.x + id.y * Width);
+    GenerateSpotLightRays(id.xy, id.x + id.y * Width);
+    GeneratePolygonLightRays(id.xy, id.x + id.y * Width);
+}
+
+// Marches each ray once and adds their contribution to the accumulation buffer.
+// Rays which hit something other than their target light will generate bounce rays if enabled.
+[numthreads(64, 1, 1)]
+void MarchRays (uint3 id : SV_DispatchThreadID) {
+    Ray ray = InputRays.Consume();
+
+    // Yeah this is stupid
+    if (ray.light_distance == 0) {
+        return;
+    }
+    
+    float light_contribution = 1.0;
+    for (uint i = 0; i < MaxSteps; i++) {
+        // Hit the light.
+        if (ray.distance >= ray.light_distance) {
+            AddRayContribution(ray, clamp(light_contribution, EPSILON, 1));
+            break;
+        }
+
+        // Hit something else.
+        const float2 ray_pos = ray.origin + ray.direction * ray.distance;
+        const SceneResult scene_result = SceneDistance(ray_pos);
+        if (scene_result.distance < EPSILON) {
+            // TODO: Generate bounces.
+            /*if (ray.light_type == RAY_TYPE_POLY && scene_result.shape_type == SHAPE_TYPE_CIRCLE) {
+                const Circle circle = Circles[scene_result.shape_id];
+                
+                const float2 dir = ray.direction.yx;
+                const float2 p1 = circle.position - dir * circle.radius;
+                const float2 p2 = circle.position + dir * circle.radius;
+
+                const float2 e1 = SegmentIntersection()
+
+                Ray r1;
+                r1.id = ray.id;
+                r1.color = polygon_light.color * (falloff * falloff);
+                r1.origin = position;
+                r1.direction = normalize(nearest - position);
+                r1.distance = 0.0;
+                r1.light_type = RAY_TYPE_POLY;
+                r1.light_distance = light_dist;
+            }*/
+            
+            break;
+        }
+
+        // This seems to generate nice shadows.
+        light_contribution = min(light_contribution, scene_result.distance / 3);
+
+        // Keep going.
+        ray.distance += scene_result.distance;
+    }
+}
+
+// Generates the final output texture from the accumulation buffer.
+[numthreads(8, 8, 1)]
+void GenerateResult(uint3 id : SV_DispatchThreadID) {
+    const uint packed = Accumulation[id.x + id.y * Width];
+
+    const float4 final = float4(
+        (float)(packed & 0xFF) / 255.0,
+        (float)(packed >> 8 & 0xFF) / 255.0,
+        (float)(packed >> 16 & 0xFF) / 255.0,
+        1.0
+    );
+
+    Result[id.xy] = final;
+}

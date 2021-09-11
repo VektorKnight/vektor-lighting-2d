@@ -1,7 +1,7 @@
 ﻿using System.Runtime.InteropServices;
 using UnityEngine;
 
-namespace VektorLighting2D.RayMarching {
+namespace VektorLighting2D.RayMarching.Shapes {
     [StructLayout(LayoutKind.Sequential)]
     public struct Circle {
         public Vector2 Position;

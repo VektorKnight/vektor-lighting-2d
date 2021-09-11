@@ -11,6 +11,7 @@ namespace VektorLighting2D.RayMarching {
         public float Distance;
 
         public uint LightId;
+        public uint LightType;
         public float LightDistance;
     }
 }

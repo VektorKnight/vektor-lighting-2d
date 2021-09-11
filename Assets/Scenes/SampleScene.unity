@@ -877,7 +877,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   _renderScale: 1
-  _maxSteps: 128
+  _maxSteps: 32
   _maxBounces: 1
   _rayMarch: {fileID: 7200000, guid: b374a0f44cf6c4f43a8cb1808e448bf4, type: 3}
   _target: {fileID: 1923924162}
