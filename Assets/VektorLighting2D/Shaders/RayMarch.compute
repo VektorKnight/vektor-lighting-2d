@@ -144,17 +144,33 @@ void GenerateSpotLightRays(const float2 position, const uint id) {
             continue;
         }
 
-        // Skip if ray direction is outside the cone.
+        // Skip if ray is coming from behind the cone.
         const float2 direction = normalize(spot_light.position - position);
-        if (!IsVectorBetween(spot_light.cone.xy, spot_light.cone.zw, direction)) {
+        const float ray_fac = dot(-direction, (spot_light.cone.xy + spot_light.cone.zw) * 0.5);
+        if (ray_fac < EPSILON) {
             continue;
         }
-        
+
+        // Calculate contribution with dot product of the cone vectors.
+        const float ray_dot = min(dot(-direction, spot_light.cone.xy), dot(-direction, spot_light.cone.zw));
+
+        // Scaling the dot by some constant controls how hard the light falls off towards the edges of the cone.
+        // A value of 10 just happens to be nice here.
+        const float cone_fac = clamp(ray_dot * 10, 0, 1);
+
+        // Calculate falloff and attenuation based on distance and cone factor.
         const float falloff = 1.0 - clamp(light_dist / spot_light.radius, 0, 1);
-        
+        const float attenuation = (falloff * falloff) * cone_fac;
+
+        // Skip if attenuation is extremely small.
+        if (attenuation < EPSILON) {
+            continue;
+        }
+
+        // Create and add the ray.
         Ray ray;
         ray.id = id;
-        ray.color = spot_light.color * (falloff * falloff);
+        ray.color = spot_light.color * attenuation;
         ray.origin = position;
         ray.direction = direction;
         ray.distance = 0.0;
@@ -212,9 +228,9 @@ void InitializeRays (uint3 id : SV_DispatchThreadID) {
     Result[id.xy] = float4(0,0,0,0);
     
     // Generate rays for this pixel.
-    GeneratePointLightRays(id.xy, id.x + id.y * Width);
+    //GeneratePointLightRays(id.xy, id.x + id.y * Width);
     GenerateSpotLightRays(id.xy, id.x + id.y * Width);
-    GeneratePolygonLightRays(id.xy, id.x + id.y * Width);
+    //GeneratePolygonLightRays(id.xy, id.x + id.y * Width);
 }
 
 // Marches each ray once and adds their contribution to the accumulation buffer.

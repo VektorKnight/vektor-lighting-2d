@@ -1,21 +1,27 @@
 ﻿static const float FMAX = 3.402823466E38;
+static const float SQRT2 = 1.414214;
 
+// Types of lights targeted by a ray.
 static const uint RAY_TYPE_POINT = 0;
-static const uint RAY_TYPE_POLY = 1;
+static const uint RAY_TYPE_RECT = 1;
+static const uint RAY_TYPE_POLY = 2;
 
+// Types of shapes in the scene.
 static const uint SHAPE_TYPE_CIRCLE = 0;
 static const uint SHAPE_TYPE_RECT = 1;
 static const uint SHAPE_TYPE_POLY = 2;
 
+// TODO: This struct is becoming excessively large.
+// Gotta split this thing up somehow and maybe remove unnecessary data.
 struct Ray {
-    uint id;            // Pixel ID of the ray.
-    float2 origin;      // Origin of the ray.
-    float2 direction;   // Normalized direction of the ray.
-    float3 color;       // Color the ray will contribute to the pixel if it reaches the target light.
-    float distance;     // Total distance travelled by this ray.
+    uint id;                  // Pixel ID of the ray.
+    float2 origin;            // Origin of the ray.
+    float2 direction;         // Normalized direction of the ray.
+    float3 color;             // Color the ray will contribute to the pixel if it reaches the target light.
+    float distance;           // Total distance travelled by this ray.
 
-    uint light_id;
-    uint light_type;
+    uint light_id;            // ID of the targeted light within its respective buffer.
+    uint light_type;          // Type of light targeted by the ray.
     float light_distance;     // Distance ray must travel to hit the target light.
 };
 
@@ -29,13 +35,15 @@ struct Rect {
     float2 extents;
 };
 
+// TODO: Segment method helps with some things but also causes a lot of data duplication.
+// Probably move this to just be indices into a vertex buffer like normal meshes.
 struct Segment {
     float2 a;
     float2 b;
 };
 
 struct Polygon {
-    uint offset;    // Starting offset in the segment buffer.
+    uint offset;     // Starting offset in the segment buffer.
     uint length;     // Number of segments.
 };
 
@@ -58,6 +66,7 @@ struct PolygonLight {
     Polygon polygon;
 };
 
+// Result of a scene intersection.
 struct SceneResult {
     float distance;
     uint shape_id;
@@ -99,6 +108,7 @@ float Cross2D(const float2 a, const float2 b) {
     return a.x * b.y - b.x * a.y;
 }
 
+// Calculates the closest point to a line segment from a given point.
 float2 PointAlongSegment(const Segment s, const float2 p) {
     const float sigma = clamp(dot(p - s.a, s.b - s.a) / dot(s.b - s.a, s.b - s.a), 0, 1);
     return s.a + sigma * (s.b - s.a);
@@ -120,6 +130,7 @@ float2 SegmentIntersection(const Segment s1, const Segment s2) {
     return float2(x, y);
 }
 
+// Calculates the center of mass between all points in a polygon.
 float2 PolygonCenter(const Polygon polygon, const StructuredBuffer<Segment> segments) {
     float2 sum = float2(0,0);
     uint total = 0;
@@ -132,6 +143,7 @@ float2 PolygonCenter(const Polygon polygon, const StructuredBuffer<Segment> segm
     return sum / total;
 }
 
+// Calculates the closest point on a polygon from a given point.
 float2 ClosestPointOnPolygon(const Polygon polygon, const StructuredBuffer<Segment> segments, const float2 p) {
     float2 nearest = float2(1, 1);
     float shortest = FMAX;
@@ -151,14 +163,17 @@ float2 ClosestPointOnPolygon(const Polygon polygon, const StructuredBuffer<Segme
     return nearest;
 }
 
-
-
 // Whether or not a vector (v) is between a and b.
 // Used for spot lights.
 bool IsVectorBetween(const float2 a, const float2 b, const float2 v) {
     return Cross2D(a, v) * Cross2D(a, b) <= 0.0 && Cross2D(b, v) * Cross2D(b, a) <= 0.0;
 }
 
+float InvLerp(const float x, const float a, const float b) {
+    return (x - a) / (b - a);
+}
+
+// Adds RGB values to a packed RGBA32 value.
 uint AddPacked(const uint a, const uint3 b) {
     // Unpack the first value.
     uint ar = (a & 0xFF);

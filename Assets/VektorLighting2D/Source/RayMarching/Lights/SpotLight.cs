@@ -25,9 +25,10 @@ namespace VektorLighting2D.RayMarching.Lights {
             Color = color;
             Radius = radius;
 
+            angle = Mathf.Clamp(angle, 1f, 179f);
+
             var halfAngle = angle * 0.5f * Mathf.Deg2Rad;
-            //rotation *= Mathf.Deg2Rad;
-            
+
             var vA = new Vector2(
                 direction.x * Mathf.Cos(-halfAngle) - direction.y * Mathf.Sin(-halfAngle),
                 direction.x * Mathf.Sin(-halfAngle) + direction.y * Mathf.Cos(-halfAngle)

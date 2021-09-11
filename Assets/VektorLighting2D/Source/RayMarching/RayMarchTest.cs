@@ -71,19 +71,19 @@ namespace VektorLighting2D.RayMarching {
             _pointLights = new[] {
                 //new PointLight(Vector2.zero, Vector3.one, 100f * _renderScale),
                 
-                //new PointLight(new Vector3(0.1f * _dimensions.x, 0.1f * _dimensions.y), new Vector3(1f, 0f, 0f), 1024f * _renderScale),
-                //new PointLight(new Vector3(0.1f * _dimensions.x, 0.9f * _dimensions.y), new Vector3(0f, 1f, 0f), 1024f * _renderScale),
-                //new PointLight(new Vector3(0.9f * _dimensions.x, 0.9f * _dimensions.y), new Vector3(0f, 0f, 1f), 1024f * _renderScale),
-                new PointLight(new Vector3(0.9f * _dimensions.x, 0.1f * _dimensions.y), new Vector3(0f, 0f, 0f), 0f * _renderScale)
+                new PointLight(new Vector3(0.1f * _dimensions.x, 0.1f * _dimensions.y), new Vector3(1f, 0f, 0f), 512f * _renderScale),
+                new PointLight(new Vector3(0.1f * _dimensions.x, 0.9f * _dimensions.y), new Vector3(0f, 1f, 0f), 512f * _renderScale),
+                new PointLight(new Vector3(0.9f * _dimensions.x, 0.9f * _dimensions.y), new Vector3(0f, 0f, 1f), 512f * _renderScale),
+                new PointLight(new Vector3(0.9f * _dimensions.x, 0.1f * _dimensions.y), new Vector3(1f, 0f, 1f), 512f * _renderScale)
             };
 
             _spotLights = new[] {
-                new SpotLight(new Vector2(0.5f * _dimensions.x, 0.5f * _dimensions.y), Vector3.zero, 512f, 90f, Vector2.down),
-                new SpotLight(new Vector2(0.5f * _dimensions.x, 0.5f * _dimensions.y), Vector3.zero, 512f, 90f, Vector2.down)
+                new SpotLight(new Vector2(0.5f * _dimensions.x, 0.25f * _dimensions.y), new Vector3(1, 0, 1), 1024f, 90f, Vector2.down),
+                new SpotLight(new Vector2(0.5f * _dimensions.x, 0.75f * _dimensions.y), new Vector3(0, 1, 1), 1024f, 90f, Vector2.up)
             };
 
             _polygonLights = new[] {
-                new PolygonLight(new Vector3(1, 1, 0.5f), 512f, new Polygon(0, 3))
+                new PolygonLight(new Vector3(1f, 1f, 0.5f), 512f, new Polygon(0, 3))
             };
 
             _segments = new[] {
@@ -103,14 +103,13 @@ namespace VektorLighting2D.RayMarching {
             
             _circles = new[] {
                 new Circle(new Vector2(0.4f * _dimensions.x, 0.4f * _dimensions.y), 16f * _renderScale),
-                //new Circle(new Vector2(0.25f * _dimensions.x, 0.75f * _dimensions.y), 16f * _renderScale),
-                //new Circle(new Vector2(0.75f * _dimensions.x, 0.75f * _dimensions.y), 16f * _renderScale),
-                //new Circle(new Vector2(0.75f * _dimensions.x, 0.25f * _dimensions.y), 16f * _renderScale),
+                new Circle(new Vector2(0.25f * _dimensions.x, 0.75f * _dimensions.y), 16f * _renderScale),
+                new Circle(new Vector2(0.75f * _dimensions.x, 0.75f * _dimensions.y), 16f * _renderScale)
             };
 
             _rects = new[] {
-                //new Rect(new Vector2(0.5f * _dimensions.x, 0.4f * _dimensions.y), new Vector2(512f, 8f) * _renderScale),
-                new Rect(new Vector2(0.5f * _dimensions.x, 2f * _dimensions.y), new Vector2(512f, 8f) * _renderScale),
+                new Rect(new Vector2(0.5f * _dimensions.x, -0.4f * _dimensions.y), new Vector2(512f, 8f) * _renderScale),
+                //new Rect(new Vector2(0.5f * _dimensions.x, 2f * _dimensions.y), new Vector2(512f, 8f) * _renderScale),
             };
 
             _pointLightBuffer = new ComputeBuffer(_pointLights.Length, Marshal.SizeOf<PointLight>());
@@ -174,11 +173,11 @@ namespace VektorLighting2D.RayMarching {
         private void Update() {
             var mouseNorm = new Vector2(Input.mousePosition.x * _renderScale, Input.mousePosition.y * _renderScale);
             _circles[0] = new Circle(mouseNorm, 32f * _renderScale);
-            _spotLights[0] = new SpotLight(new Vector2(0.5f * _dimensions.x, 0.8f * _dimensions.y), new Vector3(1, 1, 0), 1024f, 60f, new Vector2(Mathf.Sin(Time.time), Mathf.Cos(Time.time)));
-            _spotLights[1] = new SpotLight(new Vector2(0.5f * _dimensions.x, 0.2f * _dimensions.y), new Vector3(0, 1, 1), 1024f, 60f, new Vector2(Mathf.Sin(-Time.time), Mathf.Cos(-Time.time)));
+            _spotLights[0] = new SpotLight(new Vector2(0.5f * _dimensions.x, 0.8f * _dimensions.y), new Vector3(1, 0, 1), 2048f, ((Mathf.Sin(Time.time) + 1.0f) * 0.5f) * 179f, Vector2.down);
+            _spotLights[1] = new SpotLight(new Vector2(0.5f * _dimensions.x, 0.2f * _dimensions.y), new Vector3(0, 1, 1), 2048f, ((Mathf.Sin(Time.time) + 1.0f) * 0.5f) * 179f, Vector2.up);
             
             _pointLightBuffer.SetData(_pointLights);
-            //_spotLightBuffer.SetData(_spotLights);
+            _spotLightBuffer.SetData(_spotLights);
             _circleBuffer.SetData(_circles);
 
             // Clear append buffers.
@@ -214,8 +213,10 @@ namespace VektorLighting2D.RayMarching {
 
         private void OnDestroy() {
             _pointLightBuffer.Dispose();
+            _pointLightBuffer.Dispose();
             _rectBuffer.Dispose();
             _circleBuffer.Dispose();
+            _segmentBuffer.Dispose();
             _rayBufferA.Dispose();
             _rayBufferB.Dispose();
             _accumulationBuffer.Dispose();
