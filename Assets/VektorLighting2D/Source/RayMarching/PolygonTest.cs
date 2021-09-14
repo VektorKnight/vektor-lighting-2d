@@ -8,7 +8,7 @@ namespace VektorLighting2D.RayMarching {
     public class PolygonTest : MonoBehaviour {
         public ComputeShader TestShader;
         
-        private static readonly Polygon _polygon = new Polygon(0, 3);
+        private static readonly PolygonShapeData PolygonShapeData = new PolygonShapeData(0, 3, true);
         private static readonly Segment[] _segments = new[] {
             new Segment(
                 new Vector2(0.25f, 0.25f) * 10, 
@@ -38,7 +38,7 @@ namespace VektorLighting2D.RayMarching {
             return s.A + sigma * (s.B - s.A);
         }
 
-        public static Vector2 PointAlongPolygon(Polygon poly, Vector2 p) {
+        public static Vector2 PointAlongPolygon(PolygonShapeData poly, Vector2 p) {
             Vector2 nearest = Vector2.zero;
             float shortest = float.MaxValue;
             for (var i = poly.Offset; i < poly.Offset + poly.Length; i++) {
@@ -56,66 +56,44 @@ namespace VektorLighting2D.RayMarching {
             return nearest;
         }
         
-        float PolygonSDF(Polygon poly, Segment[] segments, Vector2 p) {
-            Vector2 v0 = segments[poly.Offset].A;
-            float d = Vector2.Dot(p- v0, p - v0);
-            float s = 1.0f;
-            for (uint i = poly.Offset; i < poly.Offset + poly.Length; i++) {
-                Segment seg = segments[i];
+        float PolygonSDF(PolygonShapeData poly, Segment[] segments, Vector2 p) {
+            var v0 = segments[poly.Offset].A;
+            var d = Vector2.Dot(p- v0, p - v0);
+            var s = 1.0f;
+            for (var i = poly.Offset; i < poly.Offset + poly.Length; i++) {
+                var seg = segments[i];
                 // distance
-                Vector2 e = seg.A - seg.B;
-                Vector2 w = p - seg.A;
-                Vector2 b = w - e * Mathf.Clamp( Vector2.Dot(w,e) / Vector2.Dot(e,e), 0.0f, 1.0f );
+                var e = seg.A - seg.B;
+                var w = p - seg.A;
+                var b = w - e * Mathf.Clamp( Vector2.Dot(w,e) / Vector2.Dot(e,e), 0.0f, 1.0f );
                 d = Mathf.Min( d, Vector2.Dot(b,b) );
 
                 // winding number from http://geomalgorithms.com/a03-_inclusion.html
-                bool c1 = p.y >= seg.A.y;
-                bool c2 = p.y < seg.B.y;
-                bool c3 = e.x * w.y > e.y * w.x;
+                var c1 = p.y >= seg.A.y;
+                var c2 = p.y < seg.B.y;
+                var c3 = e.x * w.y > e.y * w.x;
                 if( c1 && c2 && c3 || !c1 && !c2 && !c3 ) s = -s;  
             }
     
             return s * Mathf.Sqrt(d);
         }
 
-        private void Start() {
-            var points = new[] {
-                new Vector2(-100, 0),
-                new Vector2(100, 0),
-                new Vector2(0, -100),
-                new Vector2(0, 100)
-            };
-
-            var pointBuffer = new ComputeBuffer(points.Length, Marshal.SizeOf<Vector2>());
-            var polygonBuffer = new ComputeBuffer(1, Marshal.SizeOf<Polygon>());
-            var segmentBuffer = new ComputeBuffer(_segments.Length, Marshal.SizeOf<Segment>());
-            var outputBuffer = new ComputeBuffer(points.Length, Marshal.SizeOf<Vector4>());
-            
-            pointBuffer.SetData(points);
-            polygonBuffer.SetData(new [] { _polygon });
-            segmentBuffer.SetData(_segments);
-            
-            TestShader.SetBuffer(0, "Points", pointBuffer);
-            TestShader.SetBuffer(0, "Polygons", polygonBuffer);
-            TestShader.SetBuffer(0, "Segments", segmentBuffer);
-            TestShader.SetBuffer(0, "Output", outputBuffer);
-            
-            TestShader.Dispatch(0, points.Length, 1, 1);
-
-            _output = new Vector4[points.Length];
-            outputBuffer.GetData(_output);
-        }
-
         private void Update() {
             var mousePos = Input.mousePosition;
             var mousePosWorld = Camera.main.ScreenToWorldPoint(mousePos);
             _mousePos = new Vector2(mousePosWorld.x, mousePosWorld.y);
-            _nearest = PointAlongPolygon(_polygon, _mousePos);
+            _nearest = PointAlongPolygon(PolygonShapeData, _mousePos);
 
-            var polyDist = (_nearest - _mousePos).magnitude;
-            var sdf = PolygonSDF(_polygon, _segments, _mousePos);
+            var inv = Camera.main.worldToCameraMatrix.inverse;
+            var inv2 = Camera.main.projectionMatrix.inverse;
             
-            Debug.Log($"{polyDist}, {sdf}");
+            var mouseClip = new Vector4((mousePos.x * 2f / Screen.width) - 1f, (mousePos.y * 2f / Screen.height) - 1f, 0f, 1f);
+            var mouseView = inv2.MultiplyPoint(mouseClip);
+            //mouseView /= mouseView.w;
+            
+            var testPos = (Vector2)inv.MultiplyPoint(mouseView);
+
+            Debug.Log($"{_mousePos}, {testPos}");
         }
 
         private void OnDrawGizmos() {

@@ -1,10 +1,12 @@
 ﻿static const float FMAX = 3.402823466E38;
 static const float SQRT2 = 1.414214;
+static const float EPSILON = 1.401298E-45;
 
 // Types of lights targeted by a ray.
-static const uint RAY_TYPE_POINT = 0;
-static const uint RAY_TYPE_RECT = 1;
-static const uint RAY_TYPE_POLY = 2;
+static const uint LIGHT_TYPE_POINT = 0;
+static const uint LIGHT_TYPE_SPOT = 1;
+static const uint LIGHT_TYPE_RECT = 2;
+static const uint LIGHT_TYPE_POLY = 3;
 
 // Types of shapes in the scene.
 static const uint SHAPE_TYPE_CIRCLE = 0;
@@ -18,21 +20,19 @@ struct Ray {
     float2 origin;            // Origin of the ray.
     float2 direction;         // Normalized direction of the ray.
     float3 color;             // Color the ray will contribute to the pixel if it reaches the target light.
-    float distance;           // Total distance travelled by this ray.
-
-    uint light_id;            // ID of the targeted light within its respective buffer.
-    uint light_type;          // Type of light targeted by the ray.
     float light_distance;     // Distance ray must travel to hit the target light.
 };
 
 struct Circle {
     float2 position;
     float radius;
+    uint enabled;
 };
 
 struct Rect {
     float2 position;
     float2 extents;
+    uint enabled;
 };
 
 // TODO: Segment method helps with some things but also causes a lot of data duplication.
@@ -45,12 +45,14 @@ struct Segment {
 struct Polygon {
     uint offset;     // Starting offset in the segment buffer.
     uint length;     // Number of segments.
+    uint enabled;
 };
 
 struct PointLight {
     float2 position;
     float3 color;
     float radius;
+    uint enabled;
 };
 
 struct SpotLight {
@@ -58,19 +60,15 @@ struct SpotLight {
     float3 color;
     float radius;
     float4 cone;
+    uint enabled;
 };
 
 struct PolygonLight {
     float3 color;
     float radius;
-    Polygon polygon;
-};
-
-// Result of a scene intersection.
-struct SceneResult {
-    float distance;
-    uint shape_id;
-    uint shape_type;
+    uint offset;
+    uint count;
+    uint enabled;
 };
 
 float CircleSDF(const Circle circle, const float2 p) {
@@ -82,11 +80,11 @@ float RectSDF(const Rect rect, const float2 p) {
     return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0);
 }
 
-float PolygonSDF(const Polygon poly, const StructuredBuffer<Segment> segments, const float2 p) {
-    const float2 v0 = segments[poly.offset].a;
+float PolygonSDF(const uint offset, const uint count, const StructuredBuffer<Segment> segments, const float2 p) {
+    const float2 v0 = segments[offset].a;
     float d = dot(p- v0, p - v0);
     float s = 1.0;
-    for (uint i = poly.offset; i < poly.offset + poly.length; i++) {
+    for (uint i = offset; i < offset + count; i++) {
         const Segment seg = segments[i];
         // distance
         float2 e = seg.b - seg.a;
@@ -95,9 +93,9 @@ float PolygonSDF(const Polygon poly, const StructuredBuffer<Segment> segments, c
         d = min( d, dot(b,b) );
 
         // winding number from http://geomalgorithms.com/a03-_inclusion.html
-        bool3 cond = bool3( p.y >= seg.a.y, 
-                            p.y < seg.b.y, 
-                            e.x * w.y > e.y * w.x );
+        const bool3 cond = bool3( p.y >= seg.a.y, 
+                                  p.y < seg.b.y, 
+                                  e.x * w.y > e.y * w.x );
         if( all(cond) || all(!cond) ) s = -s;  
     }
     
@@ -114,22 +112,6 @@ float2 PointAlongSegment(const Segment s, const float2 p) {
     return s.a + sigma * (s.b - s.a);
 }
 
-float2 SegmentIntersection(const Segment s1, const Segment s2) {
-    const float a1 = s1.b.y - s1.a.y;
-    const float b1 = s1.a.x - s1.b.x;
-    const float c1 = a1 * s1.a.x + b1 * s1.a.y;
-
-    const float a2 = s2.b.y - s2.a.y;
-    const float b2 = s2.a.x - s2.b.x;
-    const float c2 = a2 * s2.a.x + b2 * s2.a.y;
-
-    const float d = a1 * b2 - a2 * b1;
-    const float x = (b2 * c1 - b1 * c2) / d;
-    const float y = (a1 * c2 - a2 * c1) / d;
-
-    return float2(x, y);
-}
-
 // Calculates the center of mass between all points in a polygon.
 float2 PolygonCenter(const Polygon polygon, const StructuredBuffer<Segment> segments) {
     float2 sum = float2(0,0);
@@ -144,10 +126,10 @@ float2 PolygonCenter(const Polygon polygon, const StructuredBuffer<Segment> segm
 }
 
 // Calculates the closest point on a polygon from a given point.
-float2 ClosestPointOnPolygon(const Polygon polygon, const StructuredBuffer<Segment> segments, const float2 p) {
+float2 ClosestPointOnPolygon(const uint offset, const uint count, const StructuredBuffer<Segment> segments, const float2 p) {
     float2 nearest = float2(1, 1);
     float shortest = FMAX;
-    for (uint i = polygon.offset; i < polygon.offset + polygon.length; i++) {
+    for (uint i = offset; i < offset + count; i++) {
         const Segment segment = segments[i];
 
         // Get point on segment and update min.
@@ -185,4 +167,14 @@ uint AddPacked(const uint a, const uint3 b) {
     ab = clamp(ab + b.b, 0, 255);
     
     return ar | ag << 8 | ab << 16;
+}
+
+float2 ScreenToWorld(const float4x4 inv_world, const float4x4 inv_proj, const float2 screen, const float2 p) {
+    const float4 clip = float4((p.x * 2.0 / screen.x) - 1.0, (p.y * 2.0 / screen.y) - 1.0, 0.0, 1.0);
+    float4 view = mul(inv_proj, clip);
+    view /= view.w;
+    
+    const float4 world = mul(inv_world, view);
+
+    return world.xy;
 }

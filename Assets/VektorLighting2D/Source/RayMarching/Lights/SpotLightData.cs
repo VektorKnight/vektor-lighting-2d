@@ -7,23 +7,18 @@ namespace VektorLighting2D.RayMarching.Lights {
     /// The cone/triangle is encoded as a range of dot product values.
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
-    public struct SpotLight {
+    public struct SpotLightData {
         public Vector2 Position;
         public Vector3 Color;
-        public float Radius;
-        public Vector4 Cone;
+        public float Range;
+        public Vector2 ConeMin;
+        public Vector2 ConeMax;
+        public uint Enabled;
 
-        public SpotLight(Vector2 position, Vector3 color, float radius, Vector4 cone) {
+        public SpotLightData(Vector2 position, Color color, float range, float angle, Vector2 direction, bool enabled) {
             Position = position;
-            Color = color;
-            Radius = radius;
-            Cone = cone;
-        }
-        
-        public SpotLight(Vector2 position, Vector3 color, float radius, float angle, Vector2 direction) {
-            Position = position;
-            Color = color;
-            Radius = radius;
+            Color = new Vector3(color.r, color.g, color.b);
+            Range = range;
 
             angle = Mathf.Clamp(angle, 1f, 179f);
 
@@ -39,7 +34,10 @@ namespace VektorLighting2D.RayMarching.Lights {
                 direction.x * Mathf.Sin(halfAngle) + direction.y * Mathf.Cos(halfAngle)
             ).normalized;
 
-            Cone = new Vector4(vA.x, vA.y, vB.x, vB.y);
+            ConeMin = vA;
+            ConeMax = vB;
+
+            Enabled = enabled ? 1u : 0;
         }
     }
 }

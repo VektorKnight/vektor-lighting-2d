@@ -1,17 +1,17 @@
 ﻿using System.Runtime.InteropServices;
 using UnityEngine;
 
-namespace VektorLighting2D.RayMarching.Lights {
+namespace VektorLighting2D.RayMarching.Shapes {
     [StructLayout(LayoutKind.Sequential)]
-    public struct PointLight {
+    public struct CircleShapeData {
         public Vector2 Position;
-        public Vector3 Color;
         public float Radius;
+        public uint Enabled;
 
-        public PointLight(Vector2 position, Vector3 color, float radius) {
+        public CircleShapeData(Vector2 position, float radius, bool enabled) {
             Position = position;
-            Color = color;
             Radius = radius;
+            Enabled = enabled ? 1u : 0;
         }
     }
 }
