@@ -143,6 +143,8 @@ float2 ClosestPointOnPolygon(const uint offset, const uint count, const Structur
     return nearest;
 }
 
+
+
 // Whether or not a vector (v) is between a and b.
 // Used for spot lights.
 bool IsVectorBetween(const float2 a, const float2 b, const float2 v) {

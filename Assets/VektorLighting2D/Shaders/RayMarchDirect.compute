@@ -18,7 +18,7 @@ uint MaxBounces;
 
 uint PixelsPerBatch;
 uint BatchOffset;
-uint BatchSign;
+uint FrameEven;
 
 // Screen stuff.
 uint Width;
@@ -45,6 +45,8 @@ StructuredBuffer<Segment> ShapeSegments;
 // Rays and result.
 ConsumeStructuredBuffer<Ray> InputRays;
 AppendStructuredBuffer<Ray> OutputRays;
+
+RWStructuredBuffer<int> RayCounter;
 
 RWStructuredBuffer<uint> Accumulation;
 RWTexture2D<float4> Result;
@@ -146,6 +148,7 @@ void GeneratePointLightRays(const float2 position, const uint id) {
         ray.light_distance = light_dist;
 
         OutputRays.Append(ray);
+        InterlockedAdd(RayCounter[0], 1);
     }
 }
 
@@ -202,6 +205,7 @@ void GenerateSpotLightRays(const float2 position, const uint id) {
         ray.light_distance = light_dist;
 
         OutputRays.Append(ray);
+        InterlockedAdd(RayCounter[0], 1);
     }
 }
 
@@ -243,26 +247,24 @@ void GeneratePolygonLightRays(const float2 position, const uint id) {
         }
 
         OutputRays.Append(ray);
+        InterlockedAdd(RayCounter[0], 1);
     }
 }
 
 // Generates rays for each pixel.
 [numthreads(64, 1, 1)]
 void InitializeRays (uint3 id : SV_DispatchThreadID) {
-    if (id.x >= PixelsPerBatch) {
-        return;
-    }
-    
     // Exit early on dummy dispatches.
     const uint offset_id = id.x + BatchOffset;
-    if (offset_id >= Width * Height) {
+    if (id.x >= PixelsPerBatch || offset_id >= Width * Height) {
         return;
     }
 
+    // Calculate pixel Id.
     const uint2 pixel = uint2(offset_id % Width, offset_id / Width);
 
     // Even/odd column swap.
-    if ((pixel.x + pixel.y) & 1 != BatchSign) {
+    if ((pixel.x + pixel.y) & 1 > FrameEven) {
         return;
     }
 
@@ -288,10 +290,16 @@ void GenerateResult(uint3 id : SV_DispatchThreadID) {
     
     const uint packed = Accumulation[id.x + id.y * Width];
 
+    // Defined in reverse order due to a Unity bug with Vulkan.
+    // No doing so results in the blue value always being zero.
+    const uint b = (packed >> 16) & 0xFF;
+    const uint g = (packed >> 8) & 0xFF;
+    const uint r = packed & 0xFF;
+    
     const float4 final = float4(
-        (float)(packed & 0xFF) / 255.0,
-        (float)(packed >> 8 & 0xFF) / 255.0,
-        (float)(packed >> 16 & 0xFF) / 255.0,
+        (float)r / 255.0,
+        (float)g / 255.0,
+        (float)b / 255.0,
         1.0
     );
 
@@ -302,24 +310,28 @@ void GenerateResult(uint3 id : SV_DispatchThreadID) {
 // Rays which hit something other than their target light will generate bounce rays if enabled.
 [numthreads(64, 1, 1)]
 void SphereTrace (uint3 id : SV_DispatchThreadID) {
-    const Ray ray = InputRays.Consume();
-
-    // Yeah this is stupid
-    if (ray.light_distance == 0) {
+    // Check counter value to make sure we don't run off the end.
+    int original = 0;
+    InterlockedAdd(RayCounter[0], -1, original);
+    if (original < 0) {
         return;
     }
     
+    // Pop a ray.
+    const Ray ray = InputRays.Consume();
+
+    // March ray.
     float light_contribution = 1.0;
-    float rayDistance = PixelSize;
+    float ray_distance = PixelSize;
     for (uint i = 0; i < MaxSteps; i++) {
         // Hit the light.
-        if (rayDistance >= ray.light_distance) {
+        if (ray_distance >= ray.light_distance) {
             AddRayContribution(ray, clamp(light_contribution * 4, EPSILON, 1));
             break;
         }
 
         // Hit something else.
-        const float2 ray_pos = ray.origin + ray.direction * rayDistance;
+        const float2 ray_pos = ray.origin + ray.direction * ray_distance;
         const float scene_dist = SceneDistance(ray_pos);
         if (scene_dist < PixelSize) {
             break;
@@ -329,6 +341,6 @@ void SphereTrace (uint3 id : SV_DispatchThreadID) {
         light_contribution = min(light_contribution, scene_dist);
 
         // Keep going.
-        rayDistance += scene_dist;
+        ray_distance += scene_dist;
     }
 }
