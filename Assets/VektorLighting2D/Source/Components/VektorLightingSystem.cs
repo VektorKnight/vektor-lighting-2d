@@ -37,8 +37,8 @@ namespace VektorLighting2D.Components {
         private static readonly List<Segment> _shapeSegments;
         
         // Renderer and camera instances.
-        private static Camera _camera;
-        private static RayMarchRenderer _renderer;
+        private Camera _camera;
+        private RayMarchRenderer _renderer;
 
         static VektorLightingSystem() {
             _lights = new List<VektorLight>();
@@ -110,9 +110,6 @@ namespace VektorLighting2D.Components {
         private void Awake() {
             _camera = GetComponent<Camera>();
             _renderer = new RayMarchRenderer(_rayMarch, _camera, _maxSteps, 1, _renderScale);
-            RebuildLightBuffers();
-            RebuildShapeBuffers();
-
             _target.texture = _renderer.ResultTexture;
         }
 

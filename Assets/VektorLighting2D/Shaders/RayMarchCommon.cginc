@@ -35,8 +35,6 @@ struct Rect {
     uint enabled;
 };
 
-// TODO: Segment method helps with some things but also causes a lot of data duplication.
-// Probably move this to just be indices into a vertex buffer like normal meshes.
 struct Segment {
     float2 a;
     float2 b;

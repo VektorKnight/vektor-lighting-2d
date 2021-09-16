@@ -1,15 +1,24 @@
+/* Performs ray marching against a scene using direct light sampling.
+ * Generally faster than the uniform version but produces less accurate results with no support for
+ * bounces/indirect lighting. 
+ * Emissive polygon shapes are also problematic with this method.
+*/ 
+
 #pragma kernel InitializeRays;
 #pragma kernel GenerateResult;
 
 // Tracing kernels.
 #pragma kernel SphereTrace;
-#pragma kernel EnhancedSphereTrace;
 
 #include "RayMarchCommon.cginc"
 
 // General config.
 uint MaxSteps;
 uint MaxBounces;
+
+uint PixelsPerBatch;
+uint BatchOffset;
+uint BatchSign;
 
 // Screen stuff.
 uint Width;
@@ -19,6 +28,7 @@ float RenderScale;
 // Camera conversion.
 float4x4 InverseProjection;
 float4x4 InverseWorld;
+float PixelSize;
 
 // Light buffers.
 StructuredBuffer<PointLight> PointLights;
@@ -47,6 +57,11 @@ float SceneDistance(const float2 position) {
     CircleShapes.GetDimensions(nc, cs);
     for (uint j = 0; j < nc; j++) {
         const Circle circle = CircleShapes[j];
+
+        if (!circle.enabled) {
+            continue;
+        }
+        
         const float circle_dist = CircleSDF(circle, position);
 
         distance = min(distance, circle_dist);
@@ -57,6 +72,11 @@ float SceneDistance(const float2 position) {
     RectShapes.GetDimensions(rc, rs);
     for (uint i = 0; i < rc; i++) {
         const Rect rect = RectShapes[i];
+
+        if (!rect.enabled) {
+            continue;
+        }
+        
         const float rect_dist = RectSDF(rect, position);
 
         distance = min(distance, rect_dist);
@@ -111,12 +131,7 @@ void GeneratePointLightRays(const float2 position, const uint id) {
         const float scene_dist = SceneDistance(position);
         
         // Skip if ray origin is outside the light's influence or inside an occluder.
-        if (light_dist > point_light.radius || scene_dist < EPSILON) {
-            continue;
-        }
-
-        // Skip if light is inside an occluder.
-        if (SceneDistance(point_light.position) < EPSILON) {
+        if (light_dist > point_light.radius || scene_dist < PixelSize) {
             continue;
         }
         
@@ -151,12 +166,7 @@ void GenerateSpotLightRays(const float2 position, const uint id) {
         const float scene_dist = SceneDistance(position);
         
         // Skip if ray origin is outside the light's influence or inside an occluder.
-        if (light_dist > spot_light.radius || scene_dist < EPSILON) {
-            continue;
-        }
-
-        // Skip if light is inside an occluder.
-        if (SceneDistance(spot_light.position) < EPSILON) {
+        if (light_dist > spot_light.radius || scene_dist < PixelSize) {
             continue;
         }
 
@@ -213,7 +223,7 @@ void GeneratePolygonLightRays(const float2 position, const uint id) {
         const float scene_dist = SceneDistance(position);
         
         // Skip if ray origin is outside the light's influence or inside an occluder.
-        if (light_dist > polygon_light.radius || scene_dist < EPSILON) {
+        if (light_dist > polygon_light.radius || scene_dist < PixelSize) {
            continue;
         }
         
@@ -237,22 +247,45 @@ void GeneratePolygonLightRays(const float2 position, const uint id) {
 }
 
 // Generates rays for each pixel.
-[numthreads(8,8,1)]
+[numthreads(64, 1, 1)]
 void InitializeRays (uint3 id : SV_DispatchThreadID) {
-    // Clear accumulation.
-    Accumulation[id.x + id.y * Width] = 0;
+    if (id.x >= PixelsPerBatch) {
+        return;
+    }
     
-    const float2 origin = ScreenToWorld(InverseWorld, InverseProjection, float2(Width, Height) * RenderScale, float2(id.x, id.y) * RenderScale);
+    // Exit early on dummy dispatches.
+    const uint offset_id = id.x + BatchOffset;
+    if (offset_id >= Width * Height) {
+        return;
+    }
+
+    const uint2 pixel = uint2(offset_id % Width, offset_id / Width);
+
+    // Even/odd column swap.
+    if ((pixel.x + pixel.y) & 1 != BatchSign) {
+        return;
+    }
+
+    // Reset accumulation buffer.
+    Accumulation[offset_id] = 0;
+
+    // Calculate current pixel and world position.
+    const float2 origin = ScreenToWorld(InverseWorld, InverseProjection, float2(Width, Height) * RenderScale, float2(pixel.x, pixel.y) * RenderScale);
     
     // Generate rays for this pixel.
-    GeneratePointLightRays(origin, id.x + id.y * Width);
-    GenerateSpotLightRays(origin, id.x + id.y * Width);
-    GeneratePolygonLightRays(origin, id.x + id.y * Width);
+    GeneratePointLightRays(origin, offset_id);
+    GenerateSpotLightRays(origin, offset_id);
+    GeneratePolygonLightRays(origin, offset_id);
 }
 
 // Generates the final output texture from the accumulation buffer.
 [numthreads(8, 8, 1)]
 void GenerateResult(uint3 id : SV_DispatchThreadID) {
+    // Exit early on dummy dispatches.
+    if (id.x >= Width || id.y >= Height) {
+        return;
+    }
+    
     const uint packed = Accumulation[id.x + id.y * Width];
 
     const float4 final = float4(
@@ -277,7 +310,7 @@ void SphereTrace (uint3 id : SV_DispatchThreadID) {
     }
     
     float light_contribution = 1.0;
-    float rayDistance = EPSILON;
+    float rayDistance = PixelSize;
     for (uint i = 0; i < MaxSteps; i++) {
         // Hit the light.
         if (rayDistance >= ray.light_distance) {
@@ -288,7 +321,7 @@ void SphereTrace (uint3 id : SV_DispatchThreadID) {
         // Hit something else.
         const float2 ray_pos = ray.origin + ray.direction * rayDistance;
         const float scene_dist = SceneDistance(ray_pos);
-        if (scene_dist < EPSILON) {
+        if (scene_dist < PixelSize) {
             break;
         }
 
@@ -297,67 +330,5 @@ void SphereTrace (uint3 id : SV_DispatchThreadID) {
 
         // Keep going.
         rayDistance += scene_dist;
-    }
-}
-
-// Marches each ray once and adds their contribution to the accumulation buffer.
-// Rays which hit something other than their target light will generate bounce rays if enabled.
-[numthreads(64, 1, 1)]
-void EnhancedSphereTrace (uint3 id : SV_DispatchThreadID) {
-    const Ray ray = InputRays.Consume();
-
-    // Yeah this is stupid
-    if (ray.light_distance == 0) {
-        return;
-    }
-
-    // Overstepping factor.
-    // According to the paper you just have ti "find" the right value.
-    // In this case, 1.1 seems to have resulted in a decent performance boost without major artifacts.
-    float omega = 1.1;
-    
-    float candidate_error = FMAX;
-    float step_length = 0.0;
-    
-    float scene_dist_prev = EPSILON;
-    float ray_distance = EPSILON;
-    float light_contribution = 1.0;
-    for (uint i = 0; i < MaxSteps; i++) {
-        // Get current scene distance.
-        const float2 ray_pos = ray.origin + ray.direction * ray_distance;
-        const float scene_dist = SceneDistance(ray_pos);
-
-        const float scene_dist_abs = abs(scene_dist);
-        const bool sor_fail = omega > 1.0 && (scene_dist_abs + scene_dist_prev) < step_length;
-        if (sor_fail) {
-            step_length -= omega * step_length;
-            omega = 1.0;
-        }
-        else {
-            step_length = scene_dist * omega;
-        }
-
-        const float error = scene_dist_abs / ray_distance;
-
-        if (!sor_fail && error < candidate_error) {
-            candidate_error = error;
-        }
-
-        // Hit the light.
-        if (!sor_fail && error < EPSILON || ray_distance >= ray.light_distance) {
-            AddRayContribution(ray, clamp(light_contribution * 8, EPSILON, 1));
-            break;
-        }
-        
-        if (scene_dist < EPSILON) {
-            break;
-        }
-
-        // This seems to generate nice shadows.
-        light_contribution = min(light_contribution, scene_dist);
-
-        // Keep going.
-        ray_distance += step_length;
-        scene_dist_prev = scene_dist_abs;
     }
 }

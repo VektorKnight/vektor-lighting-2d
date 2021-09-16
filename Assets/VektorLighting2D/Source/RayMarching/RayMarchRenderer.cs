@@ -15,18 +15,26 @@ namespace VektorLighting2D.RayMarching {
     public class RayMarchRenderer : IDisposable {
         private const int KERNEL_ID_INITIALIZE = 0;     // Generates initial rays from the scene and enabled lights.
         private const int KERNEL_ID_FINALIZE = 1;       // Renders the final result to the output texture.
-        private const int KERNEL_ID_MARCH = 3;          // Marches generated rays and may generate secondary rays.
+        private const int KERNEL_ID_MARCH = 2;          // Marches generated rays and may generate secondary rays.
+        
+        private const int DISPATCH_GROUP_SIZE = 64;
+        private const int DISPATCH_GROUP_COUNT = 65535;
         
         // General ray-marching config.
         private static readonly int _idMaxSteps = Shader.PropertyToID("MaxSteps");
         private static readonly int _idMaxBounces = Shader.PropertyToID("MaxBounces");
-        
+
+        private static readonly int _idPixelsPerBatch = Shader.PropertyToID("PixelsPerBatch");
+        private static readonly int _idBatchOffset = Shader.PropertyToID("BatchOffset");
+        private static readonly int _idBatchSign = Shader.PropertyToID("BatchSign");
+
         // Screen params.
         private static readonly int _idWidth = Shader.PropertyToID("Width");
         private static readonly int _idHeight = Shader.PropertyToID("Height");
         private static readonly int _idInverseProjection = Shader.PropertyToID("InverseProjection");
         private static readonly int _idInverseWorld = Shader.PropertyToID("InverseWorld");
         private static readonly int _idRenderScale = Shader.PropertyToID("RenderScale");
+        private static readonly int _idPixelSize = Shader.PropertyToID("PixelSize");
         
         // Light data buffers.
         private static readonly int _idPointLights = Shader.PropertyToID("PointLights");
@@ -43,7 +51,7 @@ namespace VektorLighting2D.RayMarching {
         // Ray buffers.
         private static readonly int _idInputRays = Shader.PropertyToID("InputRays");
         private static readonly int _idOutputRays = Shader.PropertyToID("OutputRays");
-        
+
         // Result buffers.
         private static readonly int _idAccumulation = Shader.PropertyToID("Accumulation");
         private static readonly int _idResult = Shader.PropertyToID("Result");
@@ -58,6 +66,8 @@ namespace VektorLighting2D.RayMarching {
         private int _lightCount;
         private int _shapeCount;
         private int _rayCountMax;
+        private int _rayBatchCount;
+        private int _pixelsPerBatch;
 
         private ComputeBuffer _pointLightBuffer;
         private ComputeBuffer _spotLightBuffer;
@@ -69,8 +79,7 @@ namespace VektorLighting2D.RayMarching {
         private ComputeBuffer _polygonBuffer;
         private ComputeBuffer _shapeSegmentBuffer;
 
-        private ComputeBuffer _rayBufferA;
-        private ComputeBuffer _rayBufferB;
+        private readonly ComputeBuffer _rayBuffer;
 
         private readonly ComputeBuffer _accumulationBuffer;
         
@@ -87,10 +96,12 @@ namespace VektorLighting2D.RayMarching {
 
             _commandBuffer = new CommandBuffer();
             
-            _resultTexture = _resultTexture = new RenderTexture(Mathf.FloorToInt(Screen.width * renderScale), Mathf.RoundToInt(Screen.height * renderScale), 1, RenderTextureFormat.Default) {
+            _resultTexture = _resultTexture = new RenderTexture(Mathf.FloorToInt(Screen.width * renderScale), Mathf.RoundToInt(Screen.height * renderScale), 1, RenderTextureFormat.ARGB32) {
                 enableRandomWrite = true,
                 filterMode = FilterMode.Bilinear
             };
+
+            _rayBuffer = new ComputeBuffer(DISPATCH_GROUP_SIZE * DISPATCH_GROUP_COUNT, Marshal.SizeOf<Ray2D>(), ComputeBufferType.Append);
 
             _accumulationBuffer = new ComputeBuffer(_resultTexture.width * _resultTexture.height, 4, ComputeBufferType.Structured);
             
@@ -110,11 +121,11 @@ namespace VektorLighting2D.RayMarching {
 
             _lightCount = pointLights.Count + spotLights.Count + polyLights.Count;
             _rayCountMax = _resultTexture.width * _resultTexture.height * _lightCount;
+
+            _rayBatchCount = Mathf.CeilToInt((float)((double)_rayCountMax / (DISPATCH_GROUP_SIZE * DISPATCH_GROUP_COUNT)));
+            _pixelsPerBatch = Mathf.FloorToInt((float)(DISPATCH_GROUP_SIZE * DISPATCH_GROUP_COUNT) / _lightCount);
             
-            _rayBufferA?.Dispose();
-            _rayBufferB?.Dispose();
-            _rayBufferA = new ComputeBuffer(_rayCountMax > 0 ? _rayCountMax : 1, Marshal.SizeOf<Ray2D>(), ComputeBufferType.Append);
-            _rayBufferB = new ComputeBuffer(_rayCountMax > 0 ? _rayCountMax : 1, Marshal.SizeOf<Ray2D>(), ComputeBufferType.Append);
+            Debug.Log($"T:{_pixelsPerBatch * _rayBatchCount} | A:{_resultTexture.width * _resultTexture.height} | B:{_pixelsPerBatch} | C:{_rayBatchCount}");
         }
 
         public void UpdateShapeBuffers(List<CircleShapeData> circleShapes, List<RectShapeData> rectShapes, List<PolygonShapeData> polygonShapes, List<Segment> shapeSegments) {
@@ -159,12 +170,11 @@ namespace VektorLighting2D.RayMarching {
             // Update camera matrices.
             _commandBuffer.SetComputeMatrixParam(_rayMarch, _idInverseProjection, _camera.projectionMatrix.inverse);
             _commandBuffer.SetComputeMatrixParam(_rayMarch, _idInverseWorld, _camera.worldToCameraMatrix.inverse);
-            
-            // Clear ray buffers.
-            _commandBuffer.SetBufferCounterValue(_rayBufferA, 0);
-            _commandBuffer.SetBufferCounterValue(_rayBufferB, 0);
-            
+            _commandBuffer.SetComputeFloatParam(_rayMarch, _idPixelSize, _camera.projectionMatrix.m11 / _resultTexture.width);
+
             // Configure initialization kernel.
+            _commandBuffer.SetComputeIntParam(_rayMarch, _idPixelsPerBatch, _pixelsPerBatch);
+            
             _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_INITIALIZE, _idPointLights, _pointLightBuffer);
             _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_INITIALIZE, _idSpotLights, _spotLightBuffer);
             _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_INITIALIZE, _idPolygonLights, _polygonLightBuffer);
@@ -175,13 +185,9 @@ namespace VektorLighting2D.RayMarching {
             _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_INITIALIZE, _idPolygonShapes, _polygonBuffer);
             _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_INITIALIZE, _idShapeSegments, _shapeSegmentBuffer);
             
-            _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_INITIALIZE, _idOutputRays, _rayBufferB);
-            
+            _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_INITIALIZE, _idOutputRays, _rayBuffer);
             _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_INITIALIZE, _idAccumulation, _accumulationBuffer);
-            
-            // Dispatch initialization kernel.
-            _commandBuffer.DispatchCompute(_rayMarch, KERNEL_ID_INITIALIZE, Mathf.CeilToInt((float)_resultTexture.width / 8), Mathf.CeilToInt((float)_resultTexture.height / 8), 1);
-            
+
             // Configure march kernel.
             _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_MARCH, _idPointLights, _pointLightBuffer);
             _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_MARCH, _idSpotLights, _spotLightBuffer);
@@ -193,33 +199,33 @@ namespace VektorLighting2D.RayMarching {
             _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_MARCH, _idPolygonShapes, _polygonBuffer);
             _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_MARCH, _idShapeSegments, _shapeSegmentBuffer);
             
+            _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_MARCH, _idInputRays, _rayBuffer);
+
             _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_MARCH, _idAccumulation, _accumulationBuffer);
             
-            // Re-run the march kernel for each bounce.
-            for (var b = 0; b < _maxBounces; b++) {
-                // Flip buffers so the output rays of the previous stage become the new input rays.
-                if (b % 2 == 0) {
-                    _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_MARCH, _idInputRays, _rayBufferB);
-                    _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_MARCH, _idOutputRays, _rayBufferA);
-                }
-                else {
-                    _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_MARCH, _idInputRays, _rayBufferA);
-                    _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_MARCH, _idOutputRays, _rayBufferB);
-                }
-                
-                // Dispatch as any times as necessary to consume the max possible rays.
-                var groupCount = Mathf.CeilToInt((float)_rayCountMax / 64);
-                var dispatchCount = Mathf.CeilToInt((float)groupCount / 65535);
-                for (var i = 0; i < dispatchCount; i++) {
-                    _commandBuffer.DispatchCompute(_rayMarch, KERNEL_ID_MARCH, 65535, 1, 1);
-                }
-            }
-            
-            // Configure and dispatch finalization kernel.
+            // Configure finalization kernel.
             _commandBuffer.SetComputeBufferParam(_rayMarch, KERNEL_ID_FINALIZE, _idAccumulation, _accumulationBuffer);
             _commandBuffer.SetComputeTextureParam(_rayMarch, KERNEL_ID_FINALIZE, _idResult, _resultTexture);
-            _commandBuffer.DispatchCompute(_rayMarch, KERNEL_ID_FINALIZE, Mathf.CeilToInt((float)_resultTexture.width / 8), Mathf.CeilToInt((float)_resultTexture.height / 8), 1);
             
+            // Re-run the initialization and march kernels for each ray batch.
+            for (var b = 0; b < _rayBatchCount; b++) {
+                // Update batch offset.
+                _commandBuffer.SetComputeIntParam(_rayMarch, _idBatchOffset, b * _pixelsPerBatch);
+                _commandBuffer.SetComputeIntParam(_rayMarch, _idBatchSign, (int)Mathf.Sign(b));
+
+                // Clear ray buffer.
+                _commandBuffer.SetBufferCounterValue(_rayBuffer, 0);
+
+                // Dispatch initialization kernel.
+                _commandBuffer.DispatchCompute(_rayMarch, KERNEL_ID_INITIALIZE, Mathf.CeilToInt((float)_pixelsPerBatch / DISPATCH_GROUP_SIZE), 1, 1);
+
+                // Dispatch march kernel on current batch.
+                _commandBuffer.DispatchCompute(_rayMarch, KERNEL_ID_MARCH, DISPATCH_GROUP_COUNT / 2, 1, 1);
+            }
+            
+            // Dispatch finalization kernel.
+            _commandBuffer.DispatchCompute(_rayMarch, KERNEL_ID_FINALIZE, Mathf.CeilToInt((float)_resultTexture.width / 8), Mathf.CeilToInt((float)_resultTexture.height / 8), 1);
+
             // Update global shader uniform.
             _commandBuffer.SetGlobalTexture(_idVektorLightMap, _resultTexture);
             
@@ -237,6 +243,10 @@ namespace VektorLighting2D.RayMarching {
             Graphics.ExecuteCommandBuffer(_commandBuffer);
         }
 
+        ~RayMarchRenderer() {
+            Dispose();
+        }
+
         public void Dispose() {
             _pointLightBuffer?.Dispose();
             _spotLightBuffer?.Dispose();
@@ -246,11 +256,12 @@ namespace VektorLighting2D.RayMarching {
             _rectBuffer?.Dispose();
             _polygonBuffer?.Dispose();
             _shapeSegmentBuffer?.Dispose();
-            _rayBufferA?.Dispose();
-            _rayBufferB?.Dispose();
+            _rayBuffer?.Dispose();
             _accumulationBuffer?.Dispose();
             _commandBuffer?.Dispose();
+            
             _resultTexture.Release();
+            Debug.Log("Ray-marching pipeline disposed.");
         }
     }
 }
