@@ -5,10 +5,8 @@
 */ 
 
 #pragma kernel InitializeRays;
-#pragma kernel GenerateResult;
-
-// Tracing kernels.
 #pragma kernel SphereTrace;
+#pragma kernel GenerateResult;
 
 #include "RayMarchCommon.cginc"
 
@@ -148,7 +146,6 @@ void GeneratePointLightRays(const float2 position, const uint id) {
         ray.light_distance = light_dist;
 
         OutputRays.Append(ray);
-        InterlockedAdd(RayCounter[0], 1);
     }
 }
 
@@ -205,7 +202,6 @@ void GenerateSpotLightRays(const float2 position, const uint id) {
         ray.light_distance = light_dist;
 
         OutputRays.Append(ray);
-        InterlockedAdd(RayCounter[0], 1);
     }
 }
 
@@ -247,19 +243,18 @@ void GeneratePolygonLightRays(const float2 position, const uint id) {
         }
 
         OutputRays.Append(ray);
-        InterlockedAdd(RayCounter[0], 1);
     }
 }
 
 // Generates rays for each pixel.
 [numthreads(64, 1, 1)]
-void InitializeRays (uint3 id : SV_DispatchThreadID) {
+void InitializeRays (const uint3 thread_id : SV_DispatchThreadID, const uint3 group_id : SV_GroupThreadID) {
     // Exit early on dummy dispatches.
-    const uint offset_id = id.x + BatchOffset;
-    if (id.x >= PixelsPerBatch || offset_id >= Width * Height) {
+    const uint offset_id = thread_id.x + BatchOffset;
+    if (thread_id.x >= PixelsPerBatch || offset_id >= Width * Height) {
         return;
     }
-
+    
     // Calculate pixel Id.
     const uint2 pixel = uint2(offset_id % Width, offset_id / Width);
 
@@ -280,34 +275,12 @@ void InitializeRays (uint3 id : SV_DispatchThreadID) {
     GeneratePolygonLightRays(origin, offset_id);
 }
 
-// Generates the final output texture from the accumulation buffer.
-[numthreads(8, 8, 1)]
-void GenerateResult(uint3 id : SV_DispatchThreadID) {
-    // Exit early on dummy dispatches.
-    if (id.x >= Width || id.y >= Height) {
-        return;
-    }
-    
-    const uint packed = Accumulation[id.x + id.y * Width];
-
-    // Defined in reverse order due to a Unity bug with Vulkan.
-    // No doing so results in the blue value always being zero.
-    const uint b = (packed >> 16) & 0xFF;
-    const uint g = (packed >> 8) & 0xFF;
-    const uint r = packed & 0xFF;
-    
-    const float4 final = float4(
-        (float)r / 255.0,
-        (float)g / 255.0,
-        (float)b / 255.0,
-        1.0
-    );
-
-    Result[id.xy] = final;
-}
-
 // Marches each ray once and adds their contribution to the accumulation buffer.
 // Rays which hit something other than their target light will generate bounce rays if enabled.
+
+groupshared Ray _groupRays[64];
+groupshared uint _groupRayCount;
+
 [numthreads(64, 1, 1)]
 void SphereTrace (uint3 id : SV_DispatchThreadID) {
     // Check counter value to make sure we don't run off the end.
@@ -343,4 +316,30 @@ void SphereTrace (uint3 id : SV_DispatchThreadID) {
         // Keep going.
         ray_distance += scene_dist;
     }
+}
+
+// Generates the final output texture from the accumulation buffer.
+[numthreads(8, 8, 1)]
+void GenerateResult(uint3 id : SV_DispatchThreadID) {
+    // Exit early on dummy dispatches.
+    if (id.x >= Width || id.y >= Height) {
+        return;
+    }
+    
+    const uint packed = Accumulation[id.x + id.y * Width];
+
+    // Defined in reverse order due to a Unity bug with Vulkan.
+    // No doing so results in the blue value always being zero.
+    const uint b = (packed >> 16) & 0xFF;
+    const uint g = (packed >> 8) & 0xFF;
+    const uint r = packed & 0xFF;
+    
+    const float4 final = float4(
+        (float)r / 255.0,
+        (float)g / 255.0,
+        (float)b / 255.0,
+        1.0
+    );
+
+    Result[id.xy] = final;
 }

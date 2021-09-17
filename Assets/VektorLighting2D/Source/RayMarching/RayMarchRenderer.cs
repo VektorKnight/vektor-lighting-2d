@@ -14,9 +14,9 @@ using Random = UnityEngine.Random;
 namespace VektorLighting2D.RayMarching {
     public class RayMarchRenderer : IDisposable {
         private const int KERNEL_ID_INITIALIZE = 0;     // Generates initial rays from the scene and enabled lights.
-        private const int KERNEL_ID_FINALIZE = 1;       // Renders the final result to the output texture.
-        private const int KERNEL_ID_MARCH = 2;          // Marches generated rays and may generate secondary rays.
-        
+        private const int KERNEL_ID_MARCH = 1;          // Marches generated rays and may generate secondary rays.
+        private const int KERNEL_ID_FINALIZE = 2;       // Renders the final result to the output texture.
+
         private const int DISPATCH_GROUP_SIZE = 64;
         private const int DISPATCH_GROUP_COUNT = 65535;
         
@@ -94,18 +94,24 @@ namespace VektorLighting2D.RayMarching {
             _rayMarch = rayMarch;
             _camera = camera;
             _maxBounces = maxBounces;
-            var renderScaleFactor = Mathf.Sqrt(1f / renderScale);
-
+            
             _commandBuffer = new CommandBuffer();
             
-            _resultTexture = _resultTexture = new RenderTexture(Mathf.FloorToInt(Screen.width * renderScale), Mathf.RoundToInt(Screen.height * renderScale), 1, RenderTextureFormat.ARGB32) {
+            // Create the result texture based on the render scale.
+            // Random write is so the shader can write to it directly.
+            // We take advantage of bilinear filtering to reduce scaling artifacts.
+            _resultTexture = _resultTexture = new RenderTexture((int)(Screen.width * renderScale), (int)(Screen.height * renderScale), 1) {
                 enableRandomWrite = true,
                 filterMode = FilterMode.Bilinear
             };
-
+            
+            // The ray buffer is allocated to be the max possible rays per batch.
+            // A secondary buffer is used to hold an atomic counter to make sure we don't underflow the ray buffer.
             _rayBuffer = new ComputeBuffer(DISPATCH_GROUP_SIZE * DISPATCH_GROUP_COUNT, Marshal.SizeOf<Ray2D>(), ComputeBufferType.Append);
             _rayCounter = new ComputeBuffer(1, 4, ComputeBufferType.IndirectArguments);
-
+            
+            // An accumulation buffer is used to store the contributions of all the rays before being applied to the result.
+            // This is necessary as atomic ops only work on 32-bit int types and multiple rays may right to the same pixel.
             _accumulationBuffer = new ComputeBuffer(_resultTexture.width * _resultTexture.height, 4, ComputeBufferType.Structured);
             
             _rayMarch.SetInt(_idMaxSteps, maxSteps);
@@ -113,6 +119,9 @@ namespace VektorLighting2D.RayMarching {
 
             _rayMarch.SetInt(_idWidth, _resultTexture.width);
             _rayMarch.SetInt(_idHeight, _resultTexture.height);
+            
+            // This is used by the shader to rescale pixel coordinates to match world space regardless of the render scale.
+            var renderScaleFactor = Mathf.Sqrt(1f / renderScale);
             _rayMarch.SetFloat(_idRenderScale, renderScaleFactor);
         }
 
@@ -123,10 +132,10 @@ namespace VektorLighting2D.RayMarching {
             WriteBufferData(lightSegments, ref _lightSegmentBuffer);
 
             _lightCount = pointLights.Count + spotLights.Count + polyLights.Count;
-            _rayCountMax = _resultTexture.width * _resultTexture.height * _lightCount;
+            _rayCountMax = _resultTexture.width * _resultTexture.height * _lightCount / 2;
 
             _rayBatchCount = Mathf.CeilToInt((float)((double)_rayCountMax / (DISPATCH_GROUP_SIZE * DISPATCH_GROUP_COUNT)));
-            _pixelsPerBatch = Mathf.FloorToInt((float)(DISPATCH_GROUP_SIZE * DISPATCH_GROUP_COUNT) / _lightCount);
+            _pixelsPerBatch = Mathf.FloorToInt((float)(DISPATCH_GROUP_SIZE * DISPATCH_GROUP_COUNT) / _lightCount) * 2;
             
             Debug.Log($"T:{_pixelsPerBatch * _rayBatchCount} | A:{_resultTexture.width * _resultTexture.height} | B:{_pixelsPerBatch} | C:{_rayBatchCount}");
         }
@@ -235,10 +244,11 @@ namespace VektorLighting2D.RayMarching {
                 _commandBuffer.CopyCounterValue(_rayBuffer, _rayCounter, 0);
 
                 // Dispatch march kernel on current batch.
+                // We dispatch half the rays per pixel since every frame flips between even/odd.
                 _commandBuffer.DispatchCompute(
                     _rayMarch, 
                     KERNEL_ID_MARCH, 
-                    Mathf.CeilToInt(((_pixelsPerBatch * _lightCount * 0.5f) / DISPATCH_GROUP_SIZE)),
+                    Mathf.CeilToInt(_pixelsPerBatch * _lightCount * 0.5f / DISPATCH_GROUP_SIZE),
                     1, 1
                 );
             }
