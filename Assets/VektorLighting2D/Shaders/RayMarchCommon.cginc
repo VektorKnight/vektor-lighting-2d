@@ -16,11 +16,17 @@ static const uint SHAPE_TYPE_POLY = 2;
 // TODO: This struct is becoming excessively large.
 // Gotta split this thing up somehow and maybe remove unnecessary data.
 struct Ray {
-    uint id;                  // Pixel ID of the ray.
+    uint pixel_id;            // Pixel ID of the ray (packed as two u16s).
     float2 origin;            // Origin of the ray.
     float2 direction;         // Normalized direction of the ray.
     float3 color;             // Color the ray will contribute to the pixel if it reaches the target light.
     float light_distance;     // Distance ray must travel to hit the target light.
+};
+
+// Splat result from a ray for a particular pixel.
+struct Splat {
+    uint pixel_id;
+    float3 color;
 };
 
 struct Circle {
@@ -153,6 +159,37 @@ bool IsVectorBetween(const float2 a, const float2 b, const float2 v) {
 
 float InvLerp(const float x, const float a, const float b) {
     return (x - a) / (b - a);
+}
+
+uint PackRGB(float3 color) {
+    const uint r = (uint)(color.r * 255.0);
+    const uint g = (uint)(color.g * 255.0);
+    const uint b = (uint)(color.b * 255.0);
+    
+    return r | g << 8 | b << 16;
+}
+
+float3 UnpackRGB(uint packed) {
+    const uint r = packed & 0xFF;
+    const uint g = packed >> 8 & 0xFF;
+    const uint b = packed >> 16 & 0xFF;
+    
+    return float3(
+        (float)r / 255.0,
+        (float)g / 255.0,
+        (float)b / 255.0
+    );
+}
+
+uint PackPixelID(uint2 pixel) {
+    return pixel.x & 0xFFFF | (pixel.y & 0xFFFF) << 16;
+}
+
+uint2 UnpackPixelID(uint id) {
+    return uint2 (
+        id & 0xFFFF,
+        id >> 16
+    );
 }
 
 // Adds RGB values to a packed RGBA32 value.

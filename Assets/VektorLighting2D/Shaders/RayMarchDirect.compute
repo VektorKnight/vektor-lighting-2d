@@ -105,7 +105,7 @@ void AddRayContribution(const Ray ray, const float scale) {
     uint original = 0;
     while (true) {
         const uint updated = AddPacked(current, v);
-        InterlockedCompareExchange(Accumulation[ray.id], current, updated, original);
+        InterlockedCompareExchange(Accumulation[ray.pixel_id], current, updated, original);
         if (original == current) {
             break;
         }
@@ -139,7 +139,7 @@ void GeneratePointLightRays(const float2 position, const uint id) {
         const float attenuation = falloff * falloff;
         
         Ray ray;
-        ray.id = id;
+        ray.pixel_id = id;
         ray.color = point_light.color * attenuation;
         ray.origin = position;
         ray.direction = normalize(point_light.position - position);
@@ -195,7 +195,7 @@ void GenerateSpotLightRays(const float2 position, const uint id) {
 
         // Create and add the ray.
         Ray ray;
-        ray.id = id;
+        ray.pixel_id = id;
         ray.color = spot_light.color * attenuation;
         ray.origin = position;
         ray.direction = direction;
@@ -230,7 +230,7 @@ void GeneratePolygonLightRays(const float2 position, const uint id) {
         const float falloff = 1.0 - clamp(light_dist / polygon_light.radius, 0, 1);
         
         Ray ray;
-        ray.id = id;
+        ray.pixel_id = id;
         ray.color = polygon_light.color * (falloff * falloff);
         ray.origin = position;
         ray.direction = normalize(nearest - position);
@@ -250,29 +250,35 @@ void GeneratePolygonLightRays(const float2 position, const uint id) {
 [numthreads(64, 1, 1)]
 void InitializeRays (const uint3 thread_id : SV_DispatchThreadID, const uint3 group_id : SV_GroupThreadID) {
     // Exit early on dummy dispatches.
-    const uint offset_id = thread_id.x + BatchOffset;
-    if (thread_id.x >= PixelsPerBatch || offset_id >= Width * Height) {
+    const uint offset_id = (thread_id.x + BatchOffset) * 2 + FrameEven;
+    if (thread_id.x >= PixelsPerBatch) {
         return;
     }
     
     // Calculate pixel Id.
-    const uint2 pixel = uint2(offset_id % Width, offset_id / Width);
+    uint2 pixel = uint2(
+        offset_id % Width,
+        offset_id / Width
+    );
 
-    // Even/odd column swap.
-    if ((pixel.x + pixel.y) & 1 > FrameEven) {
+    // Offset row by 1 every odd row to get a checkerboard.
+    pixel.x -= (pixel.y & 1);
+
+    if (pixel.x > Width || pixel.y > Height) {
         return;
     }
 
-    // Reset accumulation buffer.
-    Accumulation[offset_id] = 0;
+    // Calculate pixel ID.
+    const uint pixel_id = pixel.x + pixel.y * Width;
+    Accumulation[pixel_id] = 0;
 
     // Calculate current pixel and world position.
     const float2 origin = ScreenToWorld(InverseWorld, InverseProjection, float2(Width, Height) * RenderScale, float2(pixel.x, pixel.y) * RenderScale);
     
     // Generate rays for this pixel.
-    GeneratePointLightRays(origin, offset_id);
-    GenerateSpotLightRays(origin, offset_id);
-    GeneratePolygonLightRays(origin, offset_id);
+    GeneratePointLightRays(origin, pixel_id);
+    GenerateSpotLightRays(origin, pixel_id);
+    GeneratePolygonLightRays(origin, pixel_id);
 }
 
 // Marches each ray once and adds their contribution to the accumulation buffer.

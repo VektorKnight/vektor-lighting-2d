@@ -135,7 +135,7 @@ namespace VektorLighting2D.RayMarching {
             _rayCountMax = _resultTexture.width * _resultTexture.height * _lightCount / 2;
 
             _rayBatchCount = Mathf.CeilToInt((float)((double)_rayCountMax / (DISPATCH_GROUP_SIZE * DISPATCH_GROUP_COUNT)));
-            _pixelsPerBatch = Mathf.FloorToInt((float)(DISPATCH_GROUP_SIZE * DISPATCH_GROUP_COUNT) / _lightCount) * 2;
+            _pixelsPerBatch = Mathf.FloorToInt((float)(DISPATCH_GROUP_SIZE * DISPATCH_GROUP_COUNT) / _lightCount);
             
             Debug.Log($"T:{_pixelsPerBatch * _rayBatchCount} | A:{_resultTexture.width * _resultTexture.height} | B:{_pixelsPerBatch} | C:{_rayBatchCount}");
         }
@@ -244,11 +244,10 @@ namespace VektorLighting2D.RayMarching {
                 _commandBuffer.CopyCounterValue(_rayBuffer, _rayCounter, 0);
 
                 // Dispatch march kernel on current batch.
-                // We dispatch half the rays per pixel since every frame flips between even/odd.
                 _commandBuffer.DispatchCompute(
                     _rayMarch, 
                     KERNEL_ID_MARCH, 
-                    Mathf.CeilToInt(_pixelsPerBatch * _lightCount * 0.5f / DISPATCH_GROUP_SIZE),
+                    Mathf.CeilToInt((float)_pixelsPerBatch * _lightCount / DISPATCH_GROUP_SIZE),
                     1, 1
                 );
             }
